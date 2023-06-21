@@ -1,0 +1,371 @@
+---
+title: "Annotations"
+output: html_document
+date: "2023-06-20"
+---
+
+```{R}
+
+#Load libraries
+
+library(stats)
+library(tibble)
+library(reshape2)
+library(ggplot2)
+library(scales)
+library(parallel)
+library(cvequality)
+library(readxl)
+library(tibble)
+library(pbapply)
+#library(qvalue)
+library(gplots)
+library(gridExtra)
+```
+
+```{R}
+
+## load in data
+RNA_Seq_expression_raw_data <- 
+read.delim("brca_tcga/data_RNA_Seq_v2_expression_median.txt", stringsAsFactors = FALSE)
+
+#The 'all' approach to check if all values in a row are 0
+check_if_not_zero <- function (vector, number = 0) {
+  if (!(all (vector == number))) {
+    return (TRUE) #if not zero, then returns TRUE
+  }
+  else{
+    return(FALSE)
+  }
+}
+
+#See if there are any rows that are FALSE, meaning that are actually all 0
+all(as.vector(unlist(apply(RNA_Seq_expression_raw_data[,-1:-2], 1, check_if_not_zero)))) 
+zero_genes = as.vector(unlist(apply(RNA_Seq_expression_raw_data[,-1:-2], 1, check_if_not_zero)))
+
+#take out genes with no expression in any of the patients
+RNA_Seq_expression_raw_data = RNA_Seq_expression_raw_data[as.vector(unlist(apply(RNA_Seq_expression_raw_data[,-1:-2], 1, check_if_not_zero))),]
+
+```
+
+```{R}
+
+gene_medians = apply(RNA_Seq_expression_raw_data[, -c(1,2)], 1, median)
+
+```
+
+```{R}
+
+#' Copy and paste Brian's analysis from this point on
+## ---- Data loading-------------------------------------------------------------
+
+#Load in chromatin organization modifiers. How this was found: GO term, eukaryota => #mammalia => homo sapiens. Gives a list of gene products; there's non-unique entries #(contributed by different sources, etc)
+
+chromatin_modifiers <- read.delim("brca_tcga/Chromatin_modifiers.txt", header=FALSE, stringsAsFactors=FALSE)
+
+#the first column is the one of interest
+colnames(chromatin_modifiers)[1] <- 'Gene Names'
+
+chrom_list_to_sort_against <- unique(chromatin_modifiers$`Gene Names`)
+
+#check lengths of new and original list from chromatin modifiers
+
+length(chrom_list_to_sort_against) 
+length(chromatin_modifiers$`Gene Names`)
+
+#logic to extract the chromatin modifier genes specifically from the full RNA Seq list.
+#Use the %in% operator to (vector-wise) get the rows specifically. Use this to get
+#the quartiles for each gene:
+
+set.seed(42)
+
+chromatin_genes_RNA_seq <- RNA_Seq_expression_raw_data[RNA_Seq_expression_raw_data$Hugo_Symbol %in% chrom_list_to_sort_against,]
+
+#And these are the 'true' groupings. Let's add a column to denote that here, in front
+#of the first two columns using the 'add_column' function from tibble library:
+
+chromatin_genes_RNA_seq <- add_column(chromatin_genes_RNA_seq,
+                                      Random = 'N', .after = 2)
+
+length(rownames(chromatin_genes_RNA_seq))
+
+#We'd like to also derive a background distribution for all of these genes. To do so,
+#let's append 50 genes that are randomly selected from the dataset, and their #corresponding rows. 
+
+random_genes <- sample(RNA_Seq_expression_raw_data$Hugo_Symbol, 50)
+random_genes_RNA_seq <- RNA_Seq_expression_raw_data[RNA_Seq_expression_raw_data$Hugo_Symbol %in% random_genes,]
+
+random_names <- random_genes_RNA_seq$Hugo_Symbol
+
+#Let's also add an equivalently named column here to denote that these are the random genes: 
+
+random_genes_RNA_seq <- add_column(random_genes_RNA_seq, Random = 'Y', .after = 2)
+
+full_genes_RNA_seq <- rbind(chromatin_genes_RNA_seq, random_genes_RNA_seq)
+
+length(rownames(full_genes_RNA_seq)) == 
+length(rownames(chromatin_genes_RNA_seq)) + length(rownames(random_genes_RNA_seq)) #TRUE
+
+#creating a threshold with which to create 'hi' vs 'lo' populations of patients; here, I #choose to use top vs bottom quartile. Need to apply quantile across the rows of the #chromatin_genes data frame, excluding the first observation (which is a character string #of the gene name in question)
+
+q25 <- apply(full_genes_RNA_seq[,-1:-3], 1, quantile, probs = c(0.25), na.rm = TRUE)
+
+q75 <- apply(full_genes_RNA_seq[,-1:-3], 1, quantile, probs = c(0.75), na.rm = TRUE)
+
+
+full_genes_RNA_seq <- add_column(full_genes_RNA_seq, q25 = q25, q75 = q75, .after = 3)
+
+all (full_genes_RNA_seq$q25 <= full_genes_RNA_seq$q75) #true
+
+#Also remove data where the bottom quartile is 0 FPKM. This doesn't seem like it would
+#provide any meaningful data to a CV comparison.
+
+full_genes_RNA_seq <- 
+full_genes_RNA_seq[!(full_genes_RNA_seq$q25 == 0),]
+
+#Viewing the data and indices
+ggplot(full_genes_RNA_seq) + geom_density(aes (x = q25), color = 'red') +
+geom_density (aes (x = q75), color = 'green') + 
+labs (title = 'Plot of top and bottom quartiles of FPKM for chromatin organizers', 
+      subtitle = 'Red = q25, Green = q75',
+      x = 'Log10 Quartiles') + 
+scale_x_log10()
+
+```
+
+```{R}
+#' ### Getting groupings of the data based on chromatin modifier expression
+#' 
+#' We've now completed some EDA of the data and cleaning of useless chromatin modifier factors that wouldn't be good for grouping. Now, let's get dataframes corresponding to these groupings in a list format to each unique chromatin modifier, then use these groupings to get subsetted dataframes from the full dataset corresponding to bottom/top expressers of each chromatin modifier.
+#' 
+## ---- Getting lo/hi groupings--------------------------------------------------
+
+#Now I want lo and hi expressers (below q25, above q75) for each gene. Way to approach #this: create different groupings, based on hi/lo threshold. To first get the groupings #and return #them in a list: define a function that returns up to three entries in list #format. These are: Gene name, all names below the bottom quantile, and all names above #the top quantile.
+
+groupings_returner <- function (gene, chromatin_data, gene_col = 1, random = 3, 
+                                q25_col = 4, q75_col = 5) {
+  #the q25_col, q75_col are last two columns in the data frame
+  q25 = chromatin_data[chromatin_data[,gene_col]==gene, q25_col] 
+  q75 = chromatin_data[chromatin_data[,gene_col]==gene, q75_col]
+  rand_designation = chromatin_data[chromatin_data[,gene_col]==gene, random] 
+  #get the q25, q75 'indices'
+  row = chromatin_data[chromatin_data[,gene_col]==gene, c(-1:-2, -random, 
+                                                          -q25_col, -q75_col)]
+  #eliminate gene ID, the q25 and q75 columns; isolate a single row
+  col = data.frame(t(row)) 
+  #get into column format for easy use of row subsetting techniques
+  colnames(col) = 'expression_levels'
+  list_below_25 = rownames(col[col$expression_levels <= q25,, drop= FALSE]) 
+  #to keep row names
+  list_above_75 = rownames(col[col$expression_levels >= q75,, drop= FALSE])
+  return (list(gene, rand_designation, list_below_25, list_above_75)) 
+  #list of 3 entries. First = gene, second = bottom quartile, third = top quartile
+}
+
+#let's test that this function works as intended: make a 'test' vector that corresponds 
+#to the ACTB gene, then compare this to the corresponding list in the full list.
+#Note that the 1103 and 1104 columns correspond to the q25, q75 columns correspondingly.
+
+test <- groupings_returner('HDAC2', full_genes_RNA_seq)
+
+str(test) #should look like a 4 item list of 
+
+#Some warnings will occur: this is because I sampled 50 randomly from the full dataset.
+#Some overlapped with the list of chromatin modifiers list. This seems reasonable to 
+#keep though.
+
+groupings <- lapply(full_genes_RNA_seq$Hugo_Symbol, groupings_returner,                                       full_genes_RNA_seq)
+```
+
+```{R}
+# Name groupings
+names(groupings) <- sapply(groupings, '[[', 1)
+
+```
+
+```{R}
+#Groupings of Candidates
+genesLeadCandidate = c('AURKA', 'AURKB', 'CDC45', 'CENPM', 'CENPN', 'H2AFZ', 'ASF1B', 'CDK1', 'ENY2', 'HJURP', 'HMGA1', 'JMJD6', 'MIS18A', 'NELFE', 'RNF8', 'RUVBL1', 'SUPV3L1', 'VRK1')
+
+leadCandGroups = groupings[genesLeadCandidate]
+
+```
+
+```{R}
+CNV_data = read.delim("brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+CNV_data  = CNV_data[,-1]
+```
+
+```{R}
+
+groupings = groupings[genesLeadCandidate]
+
+Groupings2 = groupings
+
+unmatchedCounts_q25 = vector(mode = "numeric")
+unmatchedCounts_q75 = vector(mode = "numeric")
+unmatchedIDX_q25 = list()
+unmatchedIDX_q75 = list()
+
+for (i in 1:length(groupings)){
+  unmatchedCounts_q25[i] = length(which(is.na(match(groupings[[i]][[3]], colnames(CNV_data)))))
+  unmatchedCounts_q75[i] = length(which(is.na(match(groupings[[i]][[4]], colnames(CNV_data)))))
+  unmatchedIDX_q25[[i]] = which(is.na(match(groupings[[i]][[3]], colnames(CNV_data))))
+  unmatchedIDX_q75[[i]] = which(is.na(match(groupings[[i]][[4]], colnames(CNV_data))))
+}
+
+#Limit # patients
+# Subtract out non-matching patients
+q25_limit = 275-max(unmatchedCounts_q25)
+q75_limit = 275-max(unmatchedCounts_q75)
+
+limit = min(c(q25_limit, q75_limit))
+q25_limit = limit
+q75_limit = limit
+rm(limit)
+
+for (i in 1:length(groupings)){
+  Groupings2[[i]][[3]] = setdiff(groupings[[i]][[3]], groupings[[i]][[3]][unmatchedIDX_q25[[i]]])
+  Groupings2[[i]][[4]] = setdiff(groupings[[i]][[4]], groupings[[i]][[4]][unmatchedIDX_q75[[i]]])
+  
+}
+
+## subtract out random till lower threshold met
+set.seed(5)
+
+for (i in 1:length(groupings))
+  {
+  if (length(Groupings2[[i]][[3]]) >= q25_limit){
+    Groupings2[[i]][[3]] = sample(Groupings2[[i]][[3]], q25_limit)
+  }
+  
+  if (length(Groupings2[[i]][[4]]) >= q75_limit)
+    {
+    Groupings2[[i]][[4]] = sample(Groupings2[[i]][[4]], q75_limit)
+    }
+}
+
+```
+
+```{r}
+stratified_q25_CNVs = list()
+stratified_q75_CNVs = list()
+
+for ( i in 1:length(Groupings2))
+{
+  stratified_q25_CNVs[[i]] = CNV_data[,Groupings2[[i]][[3]]]
+  stratified_q75_CNVs[[i]] = CNV_data[,Groupings2[[i]][[4]]]
+  
+}
+```
+
+T-Test:
+```{r}
+## Calculate q75/q25 ratios 
+
+#Avg CNV of patients for each gene
+q75_means = lapply(stratified_q75_CNVs, function(x) apply(x, 1, mean))
+q25_means = lapply(stratified_q25_CNVs, function(x) apply(x, 1, mean))
+
+#Convert to numeric
+q75_means = lapply(q75_means, as.numeric)
+q25_means = lapply(q25_means, as.numeric)
+
+#Calculate ratios of 75:25
+q75_q25_ratios = mapply(function(x,y) x/y, q75_means, q25_means)
+
+## convert NaNs and Infs to 1s (Tidy up data)
+length(which(is.nan(q75_q25_ratios)))
+q75_q25_ratios[which(is.nan(q75_q25_ratios))] = 1  # 1 = neutral
+q75_q25_ratios[which(is.infinite(q75_q25_ratios))] = 1
+
+stats = apply(q75_q25_ratios, 2, t.test, mu = 1)
+stats.pvals = p.adjust(as.numeric(lapply(stats, function(x) x$p.value)))
+
+## 
+```
+
+Chi-Square Test:
+```{r}
+#' Now, because many of these hits correspond to chromosome segregation, etc. we would like to rule out copy number variation as a potential explanation for why these hits upregulate CV. Using a chi-square test, we should see similar distribution of -2, -1.. +2, between low and high expressers of each chromatin factor hit. If not, then this would suggest that the CV effect seen is 'artefactual'.
+#' 
+#' Run a chi-sq test for homogeneity for expression between the two groups (q10, q90). Basically, re-run the analysis but instead of using the asymptotic test, use the chi-sq test.
+
+
+
+#Now, using this list of groupings, I should then create dataframes corresponding to each
+#groupings list, i.e. for below bottom quantile and above top quantile. This function #should take in a 'key' (each LIST entry within the groupings list) and return either #nothing, or two dataframes.
+
+dataframe_returner <- function (key, full_data, additional_col_vectors = c(),
+                                key_gene_entry = 1, key_random_entry = 2, 
+                                key_25_entry = 3, key_75_entry = 4) {
+    #additional_col_vectors fetches columns by name
+  
+    #Idea is to aggr. the columns that correspond to the 'correct' patients for each
+    #quartile grouping
+    q25_dataframe = full_data[, colnames(full_data) %in% c(additional_col_vectors,
+                                                           key[[key_25_entry]])]
+    #key_2/75_entry is a numeric index
+    q75_dataframe = full_data[, colnames(full_data) %in% c(additional_col_vectors,
+                                                           key[[key_75_entry]])]
+    return (list(key[[key_gene_entry]], key[[key_random_entry]],
+                 q25_dataframe, q75_dataframe))
+}
+
+gene_vec <- c('Hugo_Symbol', 'Entrez_Gene_Id') 
+
+#Need to now reapply the q25/q75 groupings to get two dataframes for this dataset
+CNA_grouped_dataframes_list <- pblapply(groupings, dataframe_returner, 
+                                      CNV_data, gene_vec)
+
+#check that this list looks correct for a random gene, ACTL6A, index 1)
+str(dataframe_returner(groupings[[1]], RNA_Seq_expression_raw_data, gene_vec)) 
+
+#Code to actually get the grouped data
+grouped_dataframes_list <- lapply(groupings, dataframe_returner, 
+                                  RNA_Seq_expression_raw_data, gene_vec)
+
+names_of_random <- unlist(lapply(CNA_grouped_dataframes_list, 
+                          function (list) {if (list[[2]] == "Y") {
+                            return (list [[1]])
+                          }}
+                  ))
+
+#Test that the correct names were pulled out 
+test_names <- unlist(lapply(CNA_grouped_dataframes_list[509:546],
+                            function (list) {list[[1]]}))
+
+length(names_of_random) == length(test_names)
+
+#Define a function that will get fed into the test applier function defined previously
+
+indices_to_omit = -1:-2 #the gene name, entrez ID
+
+homogeneity_test <- function (row, q25_entry, q75_entry, list_of_df, 
+                                omitted_indices) { 
+  #getting the gene name, which is in the specified name entry column 
+  #(generally first column)
+  gene_name <- list_of_df[[q25_entry]][row, 1]
+  #get rows of interest
+  q25_fac <- factor((list_of_df[[q25_entry]][row, omitted_indices]))
+  q75_fac <- factor((list_of_df[[q75_entry]][row, omitted_indices]))
+  if (!all(levels(q25_fac) == levels(q75_fac))) 
+    { #if the levels aren't shared b/w two groups, reassign levels or else get
+    #incorrectly bound and uninterpretable table when calling rbind
+    common_fac <- unique(c(levels(q25_fac), levels(q75_fac)))
+    #call factor again with specified common set of factors; gives proper levels
+    q25_table <- table(factor(q25_fac, levels = common_fac))
+    q75_table <- table(factor(q75_fac, levels = common_fac))
+  } else {
+    #else just construct the table
+    q25_table <- table(q25_fac)
+    q75_table <- table(q75_fac)
+  }
+  #Need to rbind both the tables together into one contingency table; simulate p-vals 
+  #10000 times to get more accurate Monte Carlo sims
+  table_for_chi <- rbind(q25_table, q75_table)
+  test <- chisq.test (table_for_chi, simulate.p.value = TRUE, B = 10000)
+  return (list(gene_name, test$p.value))
+}
+
+```

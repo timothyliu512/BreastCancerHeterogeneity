@@ -187,6 +187,17 @@ names(groupings) <- sapply(groupings, '[[', 1)
 #Groupings of Candidates
 genesLeadCandidate = c('AURKA', 'AURKB', 'CDC45', 'CENPM', 'CENPN', 'H2AFZ', 'ASF1B', 'CDK1', 'ENY2', 'HJURP', 'HMGA1', 'JMJD6', 'MIS18A', 'NELFE', 'RNF8', 'RUVBL1', 'SUPV3L1', 'VRK1')
 
+#Pull out x amount of random genes (designated by Y)
+
+for (randomChosenGene in groupings) {
+  # Check if the 3rd index of sublist is "Y"
+  if (randomChosenGene[[2]] == 'Y') {
+    # If yes, append the 1st index of sublist to the vec_of_strings
+    genesLeadCandidate <- c(genesLeadCandidate, randomChosenGene[[1]])
+  }
+}
+
+
 leadCandGroups = groupings[genesLeadCandidate]
 
 ```
@@ -248,6 +259,7 @@ for (i in 1:length(groupings))
 ```
 
 ```{r}
+#Grouped CNV dataframes
 stratified_q25_CNVs = list()
 stratified_q75_CNVs = list()
 
@@ -284,6 +296,22 @@ stats.pvals = p.adjust(as.numeric(lapply(stats, function(x) x$p.value)))
 
 ## 
 ```
+Chi-Square Test Revised
+```{R}
+
+# table(as.factor(stratified_q25_CNVs[[1]][1,]))
+# table(as.factor(stratified_q25_CNVs[[1]][1,]))
+
+res = chisq.test(rbind(
+  table(as.factor(stratified_q75_CNVs[[2]][1,])), table(as.factor(stratified_q25_CNVs[[1]][1,]))))
+
+#bind(table(as.factor(stratified_q75_CNVs[[1]][1, ])), table(as.factor(stratified_q25_CNVs[[1]][1,     ])))
+
+
+# chisq.test(rbind(table(as.factor(stratified_q75_CNVs[[1]][1,])), table(as.factor(stratified_q25_CNVs[[1]][1,]))))
+
+```
+
 
 Chi-Square Test:
 ```{r}

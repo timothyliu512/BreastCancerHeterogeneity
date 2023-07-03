@@ -17,9 +17,10 @@ library(parallel)
 library(cvequality)
 library(readxl)
 library(pbapply)
-#library(qvalue)
+library(qvalue)
 library(gplots)
 library(gridExtra)
+library(ggpubr)
 ```
 
 ```{R}
@@ -189,9 +190,9 @@ genesLeadCandidate = c('AURKA', 'AURKB', 'CDC45', 'CENPM', 'CENPN', 'H2AFZ', 'AS
 #Pull out x amount of random genes (designated by Y)
 
 for (givenGene in groupings) {
-  # Check if the 3rd index of sublist is "Y"
+  # Check if there is "Y"
   if (givenGene[[2]] == 'Y') {
-    # If yes, append the 1st index of sublist to the vec_of_strings
+    # If yes, append 1st index of sublist to the vec_of_strings
     genesLeadCandidate <- c(genesLeadCandidate, givenGene[[1]])
   }
 }
@@ -299,39 +300,61 @@ stats.pvals = p.adjust(as.numeric(lapply(stats, function(x) x$p.value)))
 
 Chi-Square Test Revised
 
+
 ```{R}
 
-# table(as.factor(stratified_q25_CNVs[[1]][1,]))
-# table(as.factor(stratified_q25_CNVs[[1]][1,]))
-
-#Chi-Squared test
-chi_table <- rbind( table(as.factor(stratified_q75_CNVs[[3]][1,])), table(as.factor(stratified_q25_CNVs[[3]][1,])))
-chisq.test(chi_table, simulate.p.value = TRUE, B = 10000)
-
-
-gene_name <- leadCandGroups[[3]][1]
-
-list(gene_name, test$p.value)
 
 ```
 
-```{R}
-# Chi-squared test for a given gene
-perform_chisq_test <- function(gene_index) {
-    #Combine into single table
-  chi_table <- rbind(table( as.factor(stratified_q75_CNVs[[gene_index]][1,])), table(as.factor(stratified_q25_CNVs[[gene_index]][1,])) )
-    
-    # Chi-squared test
-    chisq_result <- chisq.test(chi_table, simulate.p.value = TRUE, B = 10000)
-    
-    # Get gene name
-    gene_name <- leadCandGroups[[gene_index]][1]
-    
-    # Return gene name and p-value as list
-    return(list(
-      gene_name, 
-      chisq_result$p.value))
+```{r}
+gene_names = rownames(stratified_q75_CNVs[[1]])
+aa = vector(length = length(gene_names))
+for (i in 1:length(gene_names)){
+  aa[i] <- chisq.test(rbind( table(as.factor(stratified_q75_CNVs[[1]][i+10000,])), table(as.factor(stratified_q25_CNVs[[1]][i+10000,])) ),simulate.p.value = TRUE, B = 10000)$p.value
 }
+
+```
+
+
+```{R}
+
+#Take in all genes, compare CNV of q25 rows to q75 rows for given stratified gene
+#Returns vector
+
+geneApply <- function(stratifiedq75, stratifiedq25){
+  gene_names = rownames(stratifiedq75)
+  tempV = vector( length = length(gene_names) )
+  for (i in 1:length(gene_names)){
+    a = table(as.factor(stratifiedq75[i,]))
+    b = table(as.factor(stratifiedq25[i,]))
+    if (identical(names(a), names(b))){
+      tempV[i] = chisq.test(rbind( a, b ),simulate.p.value = TRUE, B = 10000)$p.value
+    } 
+    else{
+      df = matrix(0,2,5)
+      colnames(df) = as.character(-2:2)
+      df[1,match(names(a), colnames(df))] = as.numeric(a)
+      df[2,match(names(b), colnames(df))] = as.numeric(b)
+      tempV[i] = chisq.test(df,simulate.p.value = TRUE, B = 10000)$p.value
+    }
+  }
+  tempV = p.adjust(tempV)
+  return(tempV)
+}
+
+
+# Chi-squared test for a given gene
+
+test2 = mapply(geneApply,stratified_q75_CNVs, stratified_q25_CNVs)
+
+#gene_name = name of all the genes
+#stratified_genes = the (57) stratified genes
+  
+  
+  
+  
+  
+  
 
 # Get number of genes
 num_genes <- length(stratified_q75_CNVs)
@@ -451,5 +474,78 @@ homogeneity_test <- function (row, q25_entry, q75_entry, list_of_df,
   test <- chisq.test (table_for_chi, simulate.p.value = TRUE, B = 10000)
   return (list(gene_name, test$p.value))
 }
+
+```
+
+
+
+```{R}
+load("/Users/timothyliu/Documents/R/G/chiSqpValues.RData")
+
+#tidyr, dplyr, ggplot
+
+
+```
+
+
+```{R}
+
+transposed_CNV = t(CNV_data)
+pca1 = prcomp(transposed_CNV, scale. = TRUE)
+pca_coordinates = pca1$x
+
+#Plot PCA1/PC2, only q25/q75 patients, each group diff color
+
+#########################
+#Plotting single PCA
+#########################
+
+pca1_df = data.frame(Sample = row.names(pca_coordinates), PC1 = pca_coordinates[,1], PC2 = pca_coordinates[,2])
+pca1_df$Group <- NA
+
+pca1_df$Group <- ifelse(pca1_df$Sample %in% names(stratified_q25_CNVs[[1]]), "q25", "q75")
+
+test_plot1 <- ggplot(pca1_df, aes(x=PC1, y = PC2, color = Group)) +
+  geom_point() +
+  theme_minimal() +
+  labs(color = "Sample Group") + ggplot2::ggtitle(paste(tNames[i])) + ggplot2::theme(plot.title = element_text(face="bold", size=18))
+
+test_plot1
+
+#prob have to use for loop
+#ggarrange from ggpubr
+  #takes list of plots and puts organizes them side by side
+#list of plots
+#57 diff PC plots
+
+#List of ggplots
+pca_ggplot_lists <- list()
+
+#Name of genes
+tNames <- names(groupings)
+
+#Go through 57 genes (hits and random)
+for (i in 1:length(groupings))
+{
+  pca_df_temp = pca1_df
+  
+  #Match to corresponding group
+  pca_df_temp$Group <- ifelse(pca1_df$Sample %in% names(stratified_q25_CNVs[[i]]), "q25", "q75")
+  
+  #Create ggplot
+  temp_plot <- ggplot2::ggplot(pca_df_temp, aes(x=PC1, y = PC2, color = Group)) + ggplot2::geom_point() + ggplot2::theme_minimal() + ggplot2::labs(color = "Sample Group") + ggplot2::ggtitle(paste(tNames[i])) + ggplot2::theme(plot.title = element_text(face="bold", size=18))
+
+  
+  #Add ggplot to list
+  pca_ggplot_lists[[i]] <- temp_plot
+}
+
+rm(tNames)
+
+combined_plots <- ggpubr::ggarrange(plotlist = pca_ggplot_lists, ncol = 10, nrow = 6)
+
+#PDF
+ggplot2::ggsave("combined_plots.pdf", plot = combined_plots, width = 140, height = 100, limitsize = FALSE)
+
 
 ```

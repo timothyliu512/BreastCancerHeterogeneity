@@ -338,7 +338,7 @@ geneApply <- function(stratifiedq75, stratifiedq25){
       tempV[i] = chisq.test(df,simulate.p.value = TRUE, B = 10000)$p.value
     }
   }
-  tempV = p.adjust(tempV)
+
   return(tempV)
 }
 
@@ -547,5 +547,144 @@ combined_plots <- ggpubr::ggarrange(plotlist = pca_ggplot_lists, ncol = 10, nrow
 #PDF
 ggplot2::ggsave("combined_plots.pdf", plot = combined_plots, width = 140, height = 100, limitsize = FALSE)
 
+
+```
+
+
+
+
+
+```{R}
+load("chiSqpValues_Original.RData")
+dim(chiSq_pVals2)
+head(chiSq_pVals2[[1]])
+chiSq_pVals2[1:10,1:10]
+
+?apply()
+
+chiSq_pVals2[is.nan(chiSq_pVals2)] = 1
+meanP = apply(chiSq_pVals2, 2, mean)
+
+randomGeneMeans = mean(meanP[19:57])
+stdGene = sd(meanP[19:57])
+zScores = (meanP[1:18]-randomGeneMeans)/stdGene
+hist(zScores)
+
+```
+
+PC Distances
+```{R}
+### This cell runs the PCA analysis on only the top 2000 DEGs (> 10 FPKM) ###
+#### edited out non-DEG genes here ####
+
+CNV_data = read.delim("brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+var.genes = readRDS('var_genes.RDS')
+CNV_data = CNV_data[,-1]
+CNV_data = CNV_data[intersect(var.genes, rownames(CNV_data)),]
+
+### note for PCA here we are using the SVD algorithm
+# The algorithm returns the same number of PCs as there are observations
+## This is because SVD does not use the covariance matrix to compute PCs
+
+pca = prcomp(t(CNV_data), scale. = TRUE)
+PCA_coordinates = pca$x
+PCA_coordinates_final = PCA_coordinates[, 1:50]
+PCA_coordinates_final = as.data.frame(PCA_coordinates_final)
+
+#List of dataframes
+  #Dataframes hold PC coordinates of the top and bottom quartile patients for each of the gene stratifications from the total patient PC coordinates
+dataframe_returner <- function (key, full_data, 
+                                key_gene_entry = 1, key_random_entry = 2, 
+                                key_25_entry = 3, key_75_entry = 4) {
+  
+  #key = groupings
+  #full_data = pca
+  #key_2/75_entry is a numeric index
+  
+  # Idea is to aggr. the columns that correspond to the 'correct' patients for each       # quartile grouping
+  
+  # Selecting rows based on patient names for q25 group
+  q25_patient_names <- key[[key_25_entry]] #Names of patients
+  q25_dataframe <- full_data[q25_patient_names, , drop = FALSE] #Match names with rownames from PCA and keep only those
+  q25_dataframe <- na.omit(q25_dataframe)
+
+  # Selecting rows based on patient names for q75 group
+  q75_patient_names <- key[[key_75_entry]] #Names of patients
+  q75_dataframe <- full_data[q75_patient_names, , drop = FALSE]
+  q75_dataframe <- na.omit(q75_dataframe)
+  
+  return (list(
+               key[[key_gene_entry]], 
+               key[[key_random_entry]],
+               q25_dataframe, 
+               q75_dataframe))
+}
+
+#Apply to groupings
+grouped_dataframes_list <- lapply(groupings, dataframe_returner, 
+                                  PCA_coordinates_final)
+
+grouped_dataframes_list_PCA_q25_q75_top2000DEGs <- grouped_dataframes_list
+## groupings 494 - 543 are groupings based on random genes ##
+
+#
+transposer <- function(x){
+  lower_pct = t(x[[3]][,-c(1,2)])
+  upper_pct = t(x[[4]][,-c(1,2)])
+  return(list(lower_pct, upper_pct))
+}
+
+library(pbapply)
+grouped_dataframes_list_dist_prepped <- pblapply(grouped_dataframes_list, transposer)
+
+library(parallelDist)
+
+#find euclidean mean vector for cells per each drug treatment
+centroid_appender <- function(x){
+  lower_pct = rbind(colMeans(x[[1]]), x[[1]])
+  upper_pct = rbind(colMeans(x[[2]]), x[[2]])
+  return(list(lower_pct, upper_pct))
+}
+
+grouped_dataframes_list_dist_prepped2 <- pblapply(grouped_dataframes_list_dist_prepped, centroid_appender)
+
+rm(grouped_dataframes_list_dist_prepped)
+
+#parallelDist:
+# Calculates the distances between the center of each quartile and all the points in that quartile
+distance_calculator <- function(x){
+  dist1 = parallelDist(x[[1]])
+  dist2 = parallelDist(x[[2]])
+  return(list(dist1, dist2))
+}
+
+#Stores distances in a list that has genes, which has q25 and 75 groups with their distances for each patient
+distances_tmp <- pblapply(grouped_dataframes_list_dist_prepped2, distance_calculator)
+
+#Stores distance
+distance_extractor <- function(x){
+  dist_lower_pct <- as.matrix(x[[1]])[-1,1]
+  dist_upper_pct <- as.matrix(x[[2]])[-1,1]
+  return(list(dist_lower_pct, dist_upper_pct))
+}
+
+distances_final <- pblapply(distances_tmp, distance_extractor)
+distances_final -> distances_final_q25_q75_PCA_top2000DEGs
+rm(distances_temp)
+
+#Mean distance
+mean_distance_calculator <- function(x){
+  return(c(mean(as.numeric(x[[1]])), mean(as.numeric(x[[2]]))))
+}
+
+#Gets the mean distance of lower/higher percentile group for each gene
+cluster_distances <- pblapply(distances_final, mean_distance_calculator)
+cluster_distances <- do.call(rbind, cluster_distances)
+cluster_distances <- as.data.frame(cluster_distances)
+colnames(cluster_distances) <- c('lower_pctile', 'higher_pctile')
+cluster_distances$high_to_low_ratio = cluster_distances$higher_pctile/cluster_distances$lower_pctile
+
+#Creates new columns using the rownames from cluster_distances, and appends it to the dataframe
+cluster_distances <- cbind(COs = rownames(cluster_distances), cluster_distances)
 
 ```

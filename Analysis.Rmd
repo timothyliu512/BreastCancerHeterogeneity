@@ -1,5 +1,5 @@
 ---
-title: "Annotations"
+title: "Breast Cancer Hetero Analysis"
 output: html_document
 date: "2023-06-20"
 ---
@@ -21,6 +21,7 @@ library(qvalue)
 library(gplots)
 library(gridExtra)
 library(ggpubr)
+library(ComplexHeatmap)
 ```
 
 ```{R}
@@ -28,6 +29,8 @@ library(ggpubr)
 ## load in data
 RNA_Seq_expression_raw_data <- 
 read.delim("brca_tcga/data_RNA_Seq_v2_expression_median.txt", stringsAsFactors = FALSE)
+
+RNA_Seq_expression_raw_data <- RNA_Seq_expression_raw_data[,-2]
 
 #The 'all' approach to check if all values in a row are 0
 check_if_not_zero <- function (vector, number = 0) {
@@ -61,7 +64,7 @@ gene_medians = apply(RNA_Seq_expression_raw_data[, -c(1,2)], 1, median)
 
 #Load in chromatin organization modifiers. How this was found: GO term, eukaryota => #mammalia => homo sapiens. Gives a list of gene products; there's non-unique entries #(contributed by different sources, etc)
 
-chromatin_modifiers <- read.delim("brca_tcga/Chromatin_modifiers.txt", header=FALSE, stringsAsFactors=FALSE)
+chromatin_modifiers <- read.delim("~/Downloads/brca_tcga/Chromatin_modifiers.txt", header=FALSE, stringsAsFactors=FALSE)
 
 #the first column is the one of interest
 colnames(chromatin_modifiers)[1] <- 'Gene Names'
@@ -203,7 +206,7 @@ leadCandGroups = groupings[genesLeadCandidate]
 ```
 
 ```{R}
-CNV_data = read.delim("brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+CNV_data = read.delim("~/Downloads/brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
 CNV_data  = CNV_data[,-1]
 ```
 
@@ -300,7 +303,6 @@ stats.pvals = p.adjust(as.numeric(lapply(stats, function(x) x$p.value)))
 
 Chi-Square Test Revised
 
-
 ```{R}
 
 
@@ -314,7 +316,6 @@ for (i in 1:length(gene_names)){
 }
 
 ```
-
 
 ```{R}
 
@@ -389,7 +390,6 @@ for (i in 1:num_genes) {
 
 
 ```
-
 
 Chi-Square Test:
 
@@ -477,8 +477,6 @@ homogeneity_test <- function (row, q25_entry, q75_entry, list_of_df,
 
 ```
 
-
-
 ```{R}
 load("/Users/timothyliu/Documents/R/G/chiSqpValues.RData")
 
@@ -486,7 +484,6 @@ load("/Users/timothyliu/Documents/R/G/chiSqpValues.RData")
 
 
 ```
-
 
 ```{R}
 
@@ -550,10 +547,6 @@ ggplot2::ggsave("combined_plots.pdf", plot = combined_plots, width = 140, height
 
 ```
 
-
-
-
-
 ```{R}
 load("chiSqpValues_Original.RData")
 dim(chiSq_pVals2)
@@ -573,6 +566,7 @@ hist(zScores)
 ```
 
 PC Distances
+
 ```{R}
 ### This cell runs the PCA analysis on only the top 2000 DEGs (> 10 FPKM) ###
 #### edited out non-DEG genes here ####
@@ -590,6 +584,11 @@ pca = prcomp(t(CNV_data), scale. = TRUE)
 PCA_coordinates = pca$x
 PCA_coordinates_final = PCA_coordinates[, 1:50]
 PCA_coordinates_final = as.data.frame(PCA_coordinates_final)
+
+eigs <- pca$sdev^2
+eigen_values = eigs
+explained_variance = sapply(eigen_values, function(x) x/sum(eigs))
+
 
 #List of dataframes
   #Dataframes hold PC coordinates of the top and bottom quartile patients for each of the gene stratifications from the total patient PC coordinates
@@ -621,56 +620,72 @@ dataframe_returner <- function (key, full_data,
 }
 
 #Apply to groupings
-grouped_dataframes_list <- lapply(groupings, dataframe_returner, 
+grouped_dataframes_list <- lapply(Groupings2, dataframe_returner, 
                                   PCA_coordinates_final)
 
 grouped_dataframes_list_PCA_q25_q75_top2000DEGs <- grouped_dataframes_list
 ## groupings 494 - 543 are groupings based on random genes ##
 
+## changes made -- removed transposer (no need)
 #
-transposer <- function(x){
-  lower_pct = t(x[[3]][,-c(1,2)])
-  upper_pct = t(x[[4]][,-c(1,2)])
-  return(list(lower_pct, upper_pct))
-}
+# transposer <- function(x){
+  #lower_pct = t(x[[3]])
+  #upper_pct = t(x[[4]])
+  #return(list(lower_pct, upper_pct))
+#}
 
 library(pbapply)
-grouped_dataframes_list_dist_prepped <- pblapply(grouped_dataframes_list, transposer)
+
+## changes made -- removed grouped_dataframes_list_dist_prepped step
+#grouped_dataframes_list_dist_prepped <- pblapply(grouped_dataframes_list, transposer)
 
 library(parallelDist)
 
 #find euclidean mean vector for cells per each drug treatment
 centroid_appender <- function(x){
-  lower_pct = rbind(colMeans(x[[1]]), x[[1]])
-  upper_pct = rbind(colMeans(x[[2]]), x[[2]])
+  lower_pct = rbind(colMeans(x[[3]]), x[[3]])
+  upper_pct = rbind(colMeans(x[[4]]), x[[4]])
   return(list(lower_pct, upper_pct))
 }
 
-grouped_dataframes_list_dist_prepped2 <- pblapply(grouped_dataframes_list_dist_prepped, centroid_appender)
+grouped_dataframes_list_dist_prepped2 <- pblapply(grouped_dataframes_list, centroid_appender) ## changes made -- grouped_dataframes_list instead of grouped_dataframes_list_dist_prepped
 
-rm(grouped_dataframes_list_dist_prepped)
+#rm(grouped_dataframes_list_dist_prepped)
 
 #parallelDist:
 # Calculates the distances between the center of each quartile and all the points in that quartile
 distance_calculator <- function(x){
-  dist1 = parallelDist(x[[1]])
-  dist2 = parallelDist(x[[2]])
+  dist1 = parallelDist(as.matrix(x[[1]]))
+  dist2 = parallelDist(as.matrix(x[[2]]))
   return(list(dist1, dist2))
 }
 
-#Stores distances in a list that has genes, which has q25 and 75 groups with their distances for each patient
-distances_tmp <- pblapply(grouped_dataframes_list_dist_prepped2, distance_calculator)
+## assumes that x is a 2 x N matrix where first row is centroid and second row is a patient in that centroid's quartile
 
-#Stores distance
-distance_extractor <- function(x){
-  dist_lower_pct <- as.matrix(x[[1]])[-1,1]
-  dist_upper_pct <- as.matrix(x[[2]])[-1,1]
-  return(list(dist_lower_pct, dist_upper_pct))
+### changes made ###
+
+weighted_distance_calculator = function(x, weights) {
+  dist1 = apply(x[[1]][-1,], 1, function(z, centroid) {sqrt(sum(weights*(z - centroid)^2))}, x[[1]][1,])
+  
+  dist2 = apply(x[[2]][-1,], 1, function(z, centroid) {sqrt(sum(weights*(z - centroid)^2))}, x[[2]][1,])
+  return(list(dist1, dist2))
 }
 
-distances_final <- pblapply(distances_tmp, distance_extractor)
+
+#Stores distances in a list that has genes, which has q25 and 75 groups with their distances for each patient
+distances_final <- pblapply(grouped_dataframes_list_dist_prepped2, weighted_distance_calculator, explained_variance) ## changes made
+
+## changes made -- no need for distance extractor
+#Stores distance
+#distance_extractor <- function(x){
+  #dist_lower_pct <- as.matrix(x[[1]])[-1,1]
+  #dist_upper_pct <- as.matrix(x[[2]])[-1,1]
+  #return(list(dist_lower_pct, dist_upper_pct))
+#}
+
+# distances_final <- pblapply(distances_tmp, distance_extractor)
 distances_final -> distances_final_q25_q75_PCA_top2000DEGs
-rm(distances_temp)
+#rm(distances_temp)
 
 #Mean distance
 mean_distance_calculator <- function(x){
@@ -686,5 +701,358 @@ cluster_distances$high_to_low_ratio = cluster_distances$higher_pctile/cluster_di
 
 #Creates new columns using the rownames from cluster_distances, and appends it to the dataframe
 cluster_distances <- cbind(COs = rownames(cluster_distances), cluster_distances)
+
+
+leadCandidates <- c()
+for (i in 1:length(grouped_dataframes_list))
+{
+  leadCandidates[i] <- grouped_dataframes_list[[i]][2]=='Y'
+}
+cluster_distances$random <- leadCandidates
+
+#####################
+# Bar Graph
+#####################
+library(ggplot2)
+
+#Reordering genes so random and candidates are grouped together consecutively
+cluster_distances$COs <- with(cluster_distances, reorder(COs, random))
+
+#Bar plot
+ggplot(data = cluster_distances, aes(x=COs, y=high_to_low_ratio, fill = random)) + geom_bar(stat="identity", width = 1) + 
+coord_flip() + geom_hline(yintercept = 1, linetype = "dashed", color = "black") + ggtitle("PC Distances Bar Plot")
+
+#Save output
+ggsave("PC_Distances_Bar_Plot.jpg", units="in", width=10, height=6, dpi=300)
+
+```
+
+Standard Dev.
+
+```{R}
+
+### This cell runs the PCA analysis on only the top 2000 DEGs (> 10 FPKM) ###
+#### edited out non-DEG genes here ####
+
+CNV_data = read.delim("brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+var.genes = readRDS('var_genes.RDS')
+CNV_data = CNV_data[,-1]
+CNV_data = CNV_data[intersect(var.genes, rownames(CNV_data)),]
+
+### note for PCA here we are using the SVD algorithm
+# The algorithm returns the same number of PCs as there are observations
+## This is because SVD does not use the covariance matrix to compute PCs
+
+pca = prcomp(t(CNV_data), scale. = TRUE)
+PCA_coordinates = pca$x
+PCA_coordinates_final = PCA_coordinates[, 1:50]
+PCA_coordinates_final = as.data.frame(PCA_coordinates_final)
+
+eigs <- pca$sdev^2
+eigen_values = eigs
+explained_variance = eigs/sum(eigs)
+explained_variancePrepped <- explained_variance[1:50] #Subsets only first 50 PCs
+
+
+# Taking in Groupings2, PCA_coordinates_final, and explained_variance
+PC_Weights <- function(fulldata, PC_Coords, explained_variance_vals,
+                       key_25_entry = 3, key_75_entry = 4 )
+{
+  #Names of patients in q25 group
+  q25_patients <- fulldata[[key_25_entry]]
+  
+  # Holds SD values of q25 patients for given gene
+  sd_vector_25 <- numeric(ncol(PC_Coords))
+
+  #For a given gene: go through each PC coordinate
+  for (i in 1:ncol(PC_Coords)) 
+    {
+    
+      # Selecting PC values for q25 patients in given PC
+      selected_PC_Values <- PC_Coords[q25_patients, i]
+      
+      # Get SD of given PC for q25 patients only AND multiply by weight
+      sd_vector_25[i] <- sd(selected_PC_Values, na.rm = TRUE) * explained_variance_vals[i]
+    }
+  
+  #Names of patients for q75 group
+  q75_patients <- fulldata[[key_75_entry]]
+  
+  # Holds SD values of q75 patients for given gene
+  sd_vector_75 <- numeric(ncol(PC_Coords))
+
+  #For a given gene: go through each PC coordinate
+  for (i in 1:ncol(PC_Coords)) 
+    {
+    
+      # Selecting PC values for q25 patients in given PC
+      selected_PC_Values <- PC_Coords[q75_patients, i]
+      
+      # Get SD of given PC for q25 patients only AND multiply by weight
+      sd_vector_75[i] <- sd(selected_PC_Values, na.rm = TRUE) * explained_variance_vals[i]
+     }
+  
+  # Sum up totals for q25 and q75
+  q25_sum <- sum(sd_vector_25)
+  q75_sum <- sum(sd_vector_75)
+  
+  #High/Low Ratios
+  high_to_low_ratio <- q75_sum/q25_sum
+  
+  
+  #For given element in list
+  #Get all the patient names in 25 quartile
+    #Get the SD of those patients in 25 quartile in a PC and multiply by weight
+  #Get all the patient names in 75 quartile
+    #Get the SD of those patients in 75 quartile in a PC and multiply by weight
+  #Add up all weights and SD and append to a dataframe
+  
+
+  
+    return(list(as.character(fulldata[1]),
+                as.character(fulldata[2]),
+                q25_sum,
+                q75_sum,
+                high_to_low_ratio))
+}
+
+sd_results <- lapply(Groupings2, PC_Weights, PC_Coords = PCA_coordinates_final, explained_variance_vals = explained_variancePrepped)
+
+##################################
+#Transpose results into dataframe
+##################################
+
+#Takes in whole list,
+  #Calculates high/low ratio
+
+convert_to_dataframe <- function(sd_list) 
+  {
+    # Convert each inner list into dataframe and bind them together
+    df <- do.call(rbind, lapply(sd_list, 
+                                function(x) as.data.frame(t(unlist(x)) )))
+    
+    # Rename columns
+    colnames(df) <- c("COs", "random", "q25_sum", "q75_sum", "high_to_low_ratio")
+    
+    # Convert to correct class
+    df$random <- ifelse(df$random == "Y", TRUE, FALSE)
+    df$q25_sum <- as.numeric(df$q25_sum)
+    df$q75_sum <- as.numeric(df$q75_sum)
+    df$high_to_low_ratio <- as.numeric(df$high_to_low_ratio)
+
+    return(df)
+  }
+
+sd_dataframe <- convert_to_dataframe(sd_list = sd_results)
+
+#####################
+# Bar Graph
+#####################
+library(ggplot2)
+
+#Reordering genes so random and candidates are grouped together consecutively
+sd_dataframe$COs <- with(sd_dataframe, reorder(COs, random))
+
+#Bar plot
+ggplot(data = sd_dataframe, aes(x=COs, y=high_to_low_ratio, fill = random)) + geom_bar(stat="identity", width = 1) + 
+coord_flip() + geom_hline(yintercept = 1, linetype = "dashed", color = "black") + ggtitle("PC Standard Dev. Bar Plot")
+
+#Save output
+ggsave("PC_SD_Bar_Plot.jpg", units="in", width=10, height=6, dpi=300)
+
+```
+
+Heatmap
+```{R}
+
+Groupings_Lead <- Groupings2[sapply(Groupings2, function(x) x[[2]] == "N")]
+Groupings_Rand <- Groupings2[sapply(Groupings2, function(x) x[[2]] == "Y")]
+
+
+
+#Lead Cand. Gene stratifications q25
+lead_q25_overlap <- matrix(0, ncol = length(Groupings_Lead), nrow = length(Groupings_Lead), dimnames = list(names(Groupings_Lead), names(Groupings_Lead)))
+
+# Nested loop to compare each gene with every other gene
+for (i in 1:length(Groupings_Lead)) 
+{
+  for (j in 1:length(Groupings_Lead)) 
+  {
+    # Get overlapping patient names and store count in matrix
+    lead_q25_overlap[i, j] <- length(
+      intersect(unlist(Groupings_Lead[[i]][3]), unlist(Groupings_Lead[[j]][3]))
+    )
+  }
+}
+
+# Convert matrix to dataframe
+lead_q25_overlap <- as.data.frame(lead_q25_overlap)
+
+
+
+
+
+#Lead Cand. gene stratifications q75
+lead_q75_overlap <- matrix(0, ncol = length(Groupings_Lead), nrow = length(Groupings_Lead), dimnames = list(names(Groupings_Lead), names(Groupings_Lead)))
+
+# Nested loop to compare each gene with every other gene
+for (i in 1:length(Groupings_Lead)) 
+{
+  for (j in 1:length(Groupings_Lead)) 
+  {
+    # Get overlapping patient names and store count in matrix
+    lead_q75_overlap[i, j] <- length(
+      intersect(unlist(Groupings_Lead[[i]][4]), unlist(Groupings_Lead[[j]][4]))
+    )
+  }
+}
+
+# Convert the matrix to a dataframe
+lead_q75_overlap <- as.data.frame(lead_q75_overlap)
+
+
+
+
+# Random gene stratifications q25
+rand_q25_overlap <- matrix(0, ncol = length(Groupings_Rand), nrow = length(Groupings_Rand), dimnames = list(names(Groupings_Rand), names(Groupings_Rand)))
+
+# Nested loop to compare each gene with every other gene
+for (i in 1:length(Groupings_Rand)) 
+{
+  for (j in 1:length(Groupings_Rand)) 
+  {
+    # Get overlapping patient names and store count in matrix
+    rand_q25_overlap[i, j] <- length(
+      intersect(unlist(Groupings_Rand[[i]][3]), unlist(Groupings_Rand[[j]][3]))
+    )
+  }
+}
+
+# Convert the matrix to a dataframe
+rand_q25_overlap <- as.data.frame(rand_q25_overlap)
+
+
+
+
+
+
+# Random gene stratifications q75
+rand_q75_overlap <- matrix(0, ncol = length(Groupings_Rand), nrow = length(Groupings_Rand), dimnames = list(names(Groupings_Rand), names(Groupings_Rand)))
+
+# Nested loop to compare each gene with every other gene
+for (i in 1:length(Groupings_Rand)) 
+{
+  for (j in 1:length(Groupings_Rand)) 
+  {
+    # Get overlapping patient names and store count in matrix
+    rand_q75_overlap[i, j] <- length(
+      intersect(unlist(Groupings_Rand[[i]][4]), unlist(Groupings_Rand[[j]][4]))
+    )
+  }
+}
+
+# Convert the matrix to a dataframe
+rand_q75_overlap <- as.data.frame(rand_q75_overlap)
+
+
+
+#########
+#Heatmap
+########
+library(ComplexHeatmap)
+
+#Color Scheme
+library(RColorBrewer)
+color_scheme <- colorRampPalette(brewer.pal(11, "RdBu"))(100)
+
+Heatmap(lead_q25_overlap, name = "Lead Genes Q25", col = color_scheme)
+
+Heatmap(lead_q75_overlap, name = "Lead Genes Q75", col = color_scheme)
+
+Heatmap(rand_q25_overlap, name = "Rand Genes Q25", col = color_scheme)
+
+Heatmap(rand_q75_overlap, name = "Rand Genes Q75", col = color_scheme)
+
+### draw(Heatmap(lead_q25_overlap, name = "Lead Genes Q25", col = color_scheme) + Heatmap(lead_q75_overlap, name = "Lead Genes Q75", col = color_scheme) + Heatmap(rand_q25_overlap, name = "Rand Genes Q25", col = color_scheme) + Heatmap(rand_q75_overlap, name = "Rand Genes Q75", col = color_scheme))
+
+
+
+```
+Correlation
+```{R}
+##############
+# Prepping Data
+##############
+
+# Get lead and random stratified genes into vectors
+Lead_Genes <- c()
+Rand_Genes <- c()
+
+for (i in 1:length(Groupings2))
+{
+  if (Groupings2[[i]][2] == "N") 
+  {
+    Lead_Genes <- c(Lead_Genes, Groupings2[[i]][1])
+  }
+  else
+  {
+    Rand_Genes <- c(Rand_Genes, Groupings2[[i]][1])
+  }
+}
+Lead_Genes <- unlist(Lead_Genes)
+Rand_Genes <- unlist(Rand_Genes)
+Stratified_Genes_Combined <- c(Lead_Genes, Rand_Genes)
+
+##############
+#Subsetting RNA Seq Expression 
+##############
+
+#Lead Genes
+
+#Subset RNA Seq data so it's only lead genes
+Lead_RNA_Seq_df <- RNA_Seq_expression_raw_data[RNA_Seq_expression_raw_data$Hugo_Symbol %in% Lead_Genes, ]
+
+#Remove gene name and make it row name in df
+rownames(Lead_RNA_Seq_df) <- Lead_RNA_Seq_df$Hugo_Symbol
+Lead_RNA_Seq_df <- Lead_RNA_Seq_df[-1]
+
+#Make matrix of corr values
+Lead_RNA_Seq_Corr_df <- cor(t(Lead_RNA_Seq_df))
+
+
+
+# Random Genes
+Rand_RNA_Seq_df <- RNA_Seq_expression_raw_data[RNA_Seq_expression_raw_data$Hugo_Symbol %in% Rand_Genes, ]
+
+rownames(Rand_RNA_Seq_df) <- Rand_RNA_Seq_df$Hugo_Symbol
+Rand_RNA_Seq_df <- Rand_RNA_Seq_df[-1]
+Rand_RNA_Seq_Corr_df <- cor(t(Rand_RNA_Seq_df))
+
+#Combined (Lead + Random)
+Comb_RNA_Seq_df <- RNA_Seq_expression_raw_data[RNA_Seq_expression_raw_data$Hugo_Symbol %in% Stratified_Genes_Combined, ]
+
+rownames(Comb_RNA_Seq_df) <- Comb_RNA_Seq_df$Hugo_Symbol
+Comb_RNA_Seq_df <- Comb_RNA_Seq_df[-1]
+Comb_RNA_Seq_Corr_df <- cor(t(Comb_RNA_Seq_df))
+
+##############
+# Heatmaps of Correlation
+##############
+
+library(ComplexHeatmap)
+
+#Color Scheme
+library(RColorBrewer)
+color_scheme <- colorRampPalette(brewer.pal(11, "RdBu"))(100)
+
+#Lead Genes
+Heatmap(Lead_RNA_Seq_Corr_df, name = "Lead Genes Corr. Vals", col = color_scheme)
+
+#Rand Genes
+Heatmap(Rand_RNA_Seq_Corr_df, name = "Random Genes Corr. Vals", col = color_scheme)
+
+#Combined Genes
+Heatmap(Comb_RNA_Seq_Corr_df, name = "Combined Genes Corr. Vals", col = color_scheme)
+
 
 ```

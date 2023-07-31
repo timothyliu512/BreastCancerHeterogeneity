@@ -64,7 +64,7 @@ gene_medians = apply(RNA_Seq_expression_raw_data[, -c(1,2)], 1, median)
 
 #Load in chromatin organization modifiers. How this was found: GO term, eukaryota => #mammalia => homo sapiens. Gives a list of gene products; there's non-unique entries #(contributed by different sources, etc)
 
-chromatin_modifiers <- read.delim("~/Downloads/brca_tcga/Chromatin_modifiers.txt", header=FALSE, stringsAsFactors=FALSE)
+chromatin_modifiers <- read.delim("brca_tcga/Chromatin_modifiers.txt", header=FALSE, stringsAsFactors=FALSE)
 
 #the first column is the one of interest
 colnames(chromatin_modifiers)[1] <- 'Gene Names'
@@ -172,6 +172,7 @@ groupings_returner <- function (gene, chromatin_data, gene_col = 1, random = 3,
 test <- groupings_returner('HDAC2', full_genes_RNA_seq)
 
 str(test) #should look like a 4 item list of 
+rm(test)
 
 #Some warnings will occur: this is because I sampled 50 randomly from the full dataset.
 #Some overlapped with the list of chromatin modifiers list. This seems reasonable to 
@@ -206,7 +207,7 @@ leadCandGroups = groupings[genesLeadCandidate]
 ```
 
 ```{R}
-CNV_data = read.delim("~/Downloads/brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
+CNV_data = read.delim("brca_tcga/data_CNA.txt", header = TRUE, row.names = 1, stringsAsFactors = FALSE)
 CNV_data  = CNV_data[,-1]
 ```
 
@@ -386,9 +387,6 @@ for (i in 1:num_genes) {
         adjusted_p_values_matrix[i, j] <- p.adjust(raw_p_value, method = "bonferroni")
     }
 }
-
-
-
 ```
 
 Chi-Square Test:
@@ -477,14 +475,26 @@ homogeneity_test <- function (row, q25_entry, q75_entry, list_of_df,
 
 ```
 
+Chi-Sq and Fisher's Histogram (ORIGINAL)
 ```{R}
-load("/Users/timothyliu/Documents/R/G/chiSqpValues.RData")
+#Doesn't work b/c SD is 0 for both (all p-vals = 1)
 
-#tidyr, dplyr, ggplot
+load("/Users/timothyliu/Documents/R/G/chiSqpValues_adj_final.RData")
+load("fisherpValues_adj_final.RData")
 
+#Fisher's
+apply(fisher_pVals_adj, 2, function(x) length(which(x < 0.05))) -> sig_fisher_pvals
+
+(sig_fisher_pvals[1:18] - mean(sig_fisher_pvals[19:57]))/sd(sig_fisher_pvals[19:57]) -> fisher_zscores
+
+#Chi-Squared
+apply(chiSq_pVals_adj, 2, function(x) length(which(x < 0.05))) -> sig_chi_pvals
+
+(sig_chi_pvals[1:18] - mean(sig_chi_pvals[19:57]))/sd(sig_chi_pvals[19:57]) -> chi_zscores
 
 ```
 
+PCA
 ```{R}
 
 transposed_CNV = t(CNV_data)
@@ -501,19 +511,6 @@ pca1_df = data.frame(Sample = row.names(pca_coordinates), PC1 = pca_coordinates[
 pca1_df$Group <- NA
 
 pca1_df$Group <- ifelse(pca1_df$Sample %in% names(stratified_q25_CNVs[[1]]), "q25", "q75")
-
-test_plot1 <- ggplot(pca1_df, aes(x=PC1, y = PC2, color = Group)) +
-  geom_point() +
-  theme_minimal() +
-  labs(color = "Sample Group") + ggplot2::ggtitle(paste(tNames[i])) + ggplot2::theme(plot.title = element_text(face="bold", size=18))
-
-test_plot1
-
-#prob have to use for loop
-#ggarrange from ggpubr
-  #takes list of plots and puts organizes them side by side
-#list of plots
-#57 diff PC plots
 
 #List of ggplots
 pca_ggplot_lists <- list()
@@ -547,22 +544,44 @@ ggplot2::ggsave("combined_plots.pdf", plot = combined_plots, width = 140, height
 
 ```
 
+Chi-Squared P-Vals Histogram (Revised)
 ```{R}
 load("chiSqpValues_Original.RData")
-dim(chiSq_pVals2)
-head(chiSq_pVals2[[1]])
-chiSq_pVals2[1:10,1:10]
 
-?apply()
+chisq_zscores <- c()
+# ( Number of sig. genes(1-18) - Number of rand. genes(19-57) ) / Std (Number of rand. genes(19-57))
+  #Mean of each column in chi squared
 
-chiSq_pVals2[is.nan(chiSq_pVals2)] = 1
-meanP = apply(chiSq_pVals2, 2, mean)
+for(i in 1:18)
+  {
+    nonrand_means <- length(which(chiSq_pVals2[,i] == chiSq_pVals2[1,1]))
+    rand_means <- mean(apply(chiSq_pVals2[,19:57], 2, function(x) length(which(x == chiSq_pVals2[1,1]))))
+    sd <- sd(apply(chiSq_pVals2[,19:57], 2, function(x) length(which(x == chiSq_pVals2[1,1]))))
+    
+    chisq_zscores[i] <- (nonrand_means - rand_means) / sd
+}
 
-randomGeneMeans = mean(meanP[19:57])
-stdGene = sd(meanP[19:57])
-zScores = (meanP[1:18]-randomGeneMeans)/stdGene
-hist(zScores)
+hist(chisq_zscores)
+```
 
+Fisher's Test P-Vals Histogram (Revised)
+```{R}
+load("fisherpValues_Original.RData")
+
+fisher_zscores <- c()
+# ( Number of sig. genes(1-18) - Number of rand. genes(19-57) ) / Std (Number of rand. genes(19-57))
+  #Mean of each column in chi squared
+
+for(i in 1:18)
+  {
+    nonrand_means <- length(which(fisher_pVals[,i] == fisher_pVals[1,1]))
+    rand_means <- mean(apply(fisher_pVals[,19:57], 2, function(x) length(which(x == fisher_pVals[1,1]))))
+    sd <- sd(apply(fisher_pVals[,19:57], 2, function(x) length(which(x == fisher_pVals[1,1]))))
+    
+    fisher_zscores[i] <- (nonrand_means - rand_means) / sd
+}
+
+hist(fisher_zscores)
 ```
 
 PC Distances
@@ -862,7 +881,7 @@ ggsave("PC_SD_Bar_Plot.jpg", units="in", width=10, height=6, dpi=300)
 
 ```
 
-Heatmap
+Intersection Heatmap
 ```{R}
 
 Groupings_Lead <- Groupings2[sapply(Groupings2, function(x) x[[2]] == "N")]
@@ -887,8 +906,8 @@ for (i in 1:length(Groupings_Lead))
 
 # Convert matrix to dataframe
 lead_q25_overlap <- as.data.frame(lead_q25_overlap)
-
-
+#Normalize
+lead_q25_overlap <- lead_q25_overlap/max(lead_q25_overlap)
 
 
 
@@ -909,7 +928,8 @@ for (i in 1:length(Groupings_Lead))
 
 # Convert the matrix to a dataframe
 lead_q75_overlap <- as.data.frame(lead_q75_overlap)
-
+#Normalize values
+lead_q75_overlap <- lead_q75_overlap/max(lead_q75_overlap)
 
 
 
@@ -930,6 +950,8 @@ for (i in 1:length(Groupings_Rand))
 
 # Convert the matrix to a dataframe
 rand_q25_overlap <- as.data.frame(rand_q25_overlap)
+#Normalize
+rand_q25_overlap <- rand_q25_overlap/max(rand_q25_overlap)
 
 
 
@@ -954,6 +976,8 @@ for (i in 1:length(Groupings_Rand))
 # Convert the matrix to a dataframe
 rand_q75_overlap <- as.data.frame(rand_q75_overlap)
 
+#Normalize values (0 to 1 scale)
+rand_q75_overlap <- rand_q75_overlap/max(rand_q75_overlap)
 
 
 #########
@@ -978,7 +1002,7 @@ Heatmap(rand_q75_overlap, name = "Rand Genes Q75", col = color_scheme)
 
 
 ```
-Correlation
+Correlation Heatmap
 ```{R}
 ##############
 # Prepping Data
@@ -1043,16 +1067,26 @@ library(ComplexHeatmap)
 
 #Color Scheme
 library(RColorBrewer)
-color_scheme <- colorRampPalette(brewer.pal(11, "RdBu"))(100)
+color_scheme <- colorRampPalette(brewer.pal(11, "YlOrRd"))(100)
 
 #Lead Genes
 Heatmap(Lead_RNA_Seq_Corr_df, name = "Lead Genes Corr. Vals", col = color_scheme)
 
 #Rand Genes
-Heatmap(Rand_RNA_Seq_Corr_df, name = "Random Genes Corr. Vals", col = color_scheme)
+bb <- Heatmap(Rand_RNA_Seq_Corr_df, name = "Random Genes Corr. Vals", col = color_scheme)
 
 #Combined Genes
 Heatmap(Comb_RNA_Seq_Corr_df, name = "Combined Genes Corr. Vals", col = color_scheme)
 
+pdf('htmps_corr.pdf', width = 12, height = 10)
+draw(aa)
+dev.set(dev.next())
 
 ```
+
+
+```{R}
+
+
+```
+
